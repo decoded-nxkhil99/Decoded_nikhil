@@ -256,9 +256,9 @@ async function checkMembership(userId, channels) {
   return { error: false, notJoined };
 }
 
-async function deliverFile(userId, chatId, file) {
+async function deliverFile(userId, chatId, file, membershipVerified = false) {
   const required = activeRequiredChannels();
-  if (required.length) {
+  if (required.length && !membershipVerified) {
     const membership = await checkMembership(userId, required);
     if (membership.error) {
       await sendMessage(
@@ -289,16 +289,22 @@ function findFile(fileId) {
   return state.files.find((file) => file.id.toLowerCase() === fileId.toLowerCase());
 }
 
-async function showFiles(chatId) {
+async function showFiles(chatId, membershipVerified = false) {
   if (state.files.length === 0) {
     await sendMessage(chatId, "No files are available yet. Please check back later.");
     return;
   }
-  await sendMessage(chatId, "Choose a file. Required channel membership is checked before delivery.", {
+  await sendMessage(
+    chatId,
+    membershipVerified
+      ? "✅ All channels verified. Choose your file:"
+      : "Choose a file. Required channel membership is checked before delivery.",
+    {
     inline_keyboard: state.files.slice(0, 100).map((file) => [
       { text: file.title.slice(0, 60), callback_data: `get:${file.id}` },
     ]),
-  });
+    },
+  );
 }
 
 function parseChannelArgument(value, role, suppliedUrl) {
@@ -404,7 +410,14 @@ async function handleCallback(callbackQuery) {
       );
       return;
     }
-    await sendMessage(chatId, "✅ All channels verified. Use /files to browse and request a file.");
+    if (state.files.length === 0) {
+      await sendMessage(chatId, "✅ All channels verified, but no files have been saved yet. Please contact the bot admin.");
+    } else if (state.files.length === 1) {
+      await sendMessage(chatId, "✅ All channels verified. Sending your file now…");
+      await deliverFile(userId, chatId, state.files[0], true);
+    } else {
+      await showFiles(chatId, true);
+    }
     return;
   }
 
