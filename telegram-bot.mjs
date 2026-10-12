@@ -18,6 +18,10 @@ if (rootAdminIds.size === 0 || [...rootAdminIds].some((id) => !/^\d+$/.test(id))
 
 const dataFile = resolve(process.env.DATA_FILE?.trim() || "./data/telegram-bot-state.json");
 const apiBase = `https://api.telegram.org/bot${token}`;
+const proofsUrl = process.env.PROOFS_URL?.trim();
+if (proofsUrl && !/^https:\/\/\S+$/i.test(proofsUrl)) {
+  throw new Error("PROOFS_URL must be a valid HTTPS link.");
+}
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
 class TelegramApiError extends Error {
@@ -215,11 +219,17 @@ function activeRequiredChannels() {
   return state.channels.filter((channel) => channel.requireJoin);
 }
 
-function channelJoinKeyboard(channels, fileId) {
+function channelJoinKeyboard(channels, action) {
+  const buttons = channels.map((channel) => ({ text: "Join", url: channel.url }));
+  if (proofsUrl) buttons.push({ text: "Proofs", url: proofsUrl });
+  const rows = [];
+  for (let index = 0; index < buttons.length; index += 2) {
+    rows.push(buttons.slice(index, index + 2));
+  }
   return {
     inline_keyboard: [
-      ...channels.map((channel) => [{ text: `Join ${channel.title}`, url: channel.url }]),
-      [{ text: "I've joined — verify", callback_data: `verify:${fileId}` }],
+      ...rows,
+      [{ text: action === "start" ? "Continue" : "I've joined — verify", callback_data: `verify:${action}` }],
     ],
   };
 }
@@ -240,7 +250,7 @@ async function checkMembership(userId, channels) {
       }
     } catch (error) {
       console.error(`Membership check failed for ${channel.chatId}: ${error.message}`);
-      return { error: true, notJoined: [] };
+      return { error: true, channelId: channel.chatId, notJoined: [] };
     }
   }
   return { error: false, notJoined };
@@ -253,7 +263,7 @@ async function deliverFile(userId, chatId, file) {
     if (membership.error) {
       await sendMessage(
         chatId,
-        "I couldn't verify channel membership. Please try again in a moment, or contact the bot admin.",
+        `I couldn't verify membership for channel ${membership.channelId}. Please make the bot an admin in that channel and check that its channel ID is correct.`,
       );
       return;
     }
@@ -364,6 +374,39 @@ async function handleCallback(callbackQuery) {
   const data = callbackQuery.data ?? "";
   const userId = callbackQuery.from.id;
   const chatId = callbackQuery.message?.chat.id ?? userId;
+
+  if (data === "user:files") {
+    await answerCallback(callbackQuery);
+    await showFiles(chatId);
+    return;
+  }
+
+  if (data.startsWith("verify:") && data.slice("verify:".length) === "start") {
+    await answerCallback(callbackQuery, "Checking channel membership…");
+    const required = activeRequiredChannels();
+    if (required.length === 0) {
+      await sendMessage(chatId, "No join channels are configured. Use /files to browse available files.");
+      return;
+    }
+    const membership = await checkMembership(userId, required);
+    if (membership.error) {
+      await sendMessage(
+        chatId,
+        `I couldn't verify membership for channel ${membership.channelId}. Please make the bot an admin in that channel and check that its channel ID is correct.`,
+      );
+      return;
+    }
+    if (membership.notJoined.length) {
+      await sendMessage(
+        chatId,
+        "Please join every channel above, then tap Continue.",
+        channelJoinKeyboard(membership.notJoined, "start"),
+      );
+      return;
+    }
+    await sendMessage(chatId, "✅ All channels verified. Use /files to browse and request a file.");
+    return;
+  }
 
   if (data.startsWith("get:") || data.startsWith("verify:")) {
     const fileId = data.slice(data.indexOf(":") + 1);
@@ -521,10 +564,19 @@ async function handleMessage(message) {
       startedAt: state.users[id]?.startedAt ?? new Date().toISOString(),
     };
     await saveState();
-    await sendMessage(
-      chatId,
-      "Welcome! Use /files to browse. Join every required channel and tap verify to unlock a file. Use /stop to stop bot updates.",
-    );
+    const required = activeRequiredChannels();
+    if (required.length) {
+      await sendMessage(
+        chatId,
+        "Must Join All Channels To Get Access\nJoin every channel below, then tap Continue.",
+        channelJoinKeyboard(required, "start"),
+      );
+    } else {
+      await sendMessage(
+        chatId,
+        "Welcome! Use /files to browse and request available files. Use /stop to stop bot updates.",
+      );
+    }
     return;
   }
 
@@ -551,6 +603,10 @@ async function handleMessage(message) {
   }
 
   if (command?.name === "get") {
+    if (!command.args) {
+      await sendMessage(chatId, "Usage: /get <file ID>\nUse /files to see the available files.");
+      return;
+    }
     const file = findFile(command.args);
     if (!file) {
       await sendMessage(chatId, "File not found. Use /files to see available files.");
